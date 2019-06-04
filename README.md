@@ -1,0 +1,9 @@
+# pipe_server
+windows异步管道，源自于https://docs.microsoft.com/zh-cn/windows/desktop/ipc/named-pipe-server-using-completion-routines改写
+
+以下示例是单线程管道服务器，它创建消息类型管道并使用重叠操作。它使用扩展函数ReadFileEx和WriteFileEx来使用完成例程执行重叠I / O，该例程在操作完成时排队等待执行。管道服务器使用WaitForSingleObjectEx函数，该函数执行可警告的等待操作，该操作在完成例程准备好执行时返回。在发出事件对象信号时，wait函数也会返回，在此示例中，表示重叠的ConnectNamedPipe操作已完成（新客户端已连接）。此管道服务器可与命名管道客户端中描述的管道客户端一起使用。
+
+最初，管道服务器创建管道的单个实例并启动重叠的ConnectNamedPipe操作。当客户端连接时，服务器分配一个结构来为该管道实例提供存储，然后调用ReadFileEx函数来启动一系列I / O操作来处理与客户端的通信。每个操作都指定一个完成例程，该例程执行序列中的下一个操作。当客户端断开连接并且管道实例关闭时，序列终止。在启动新客户端的操作序列之后，服务器创建另一个管道实例并等待下一个客户端连接。
+
+ReadFileEx和WriteFileEx函数的参数指定完成例程和指向OVERLAPPED结构的指针。该指针在其lpOverLap参数中传递给完成例程。因为OVERLAPPED结构指向为每个管道实例分配的结构中的第一个成员，所以完成例程可以使用其lpOverLap参数来访问管道实例的结构。
+
