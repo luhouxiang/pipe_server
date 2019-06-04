@@ -30,3 +30,13 @@
 *.exe
 *.out
 *.app
+
+*.VC.db
+*.VC.VC.*
+
+ipch/
+.vs/
+src/Debug/
+src/Release/
+src/x64/
+
