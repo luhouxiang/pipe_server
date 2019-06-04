@@ -1,5 +1,5 @@
 ﻿/*****************************************************************************
- * file  : test_asio_pipe.cpp
+ * file  : pipe_server.cpp
  * date  : 2019-06-04
  * author: luhx
  *
@@ -33,10 +33,10 @@ BOOL CreateAndConnectInstance(LPOVERLAPPED);
 BOOL ConnectToNewClient(HANDLE, LPOVERLAPPED);
 VOID GetAnswerToRequest(LPPIPEINST);
 
-VOID WINAPI CompletedWriteRoutine(DWORD, DWORD, LPOVERLAPPED);
+VOID WINAPI DoReadRoutine(DWORD, DWORD, LPOVERLAPPED);
 VOID WINAPI CompletedReadRoutine(DWORD, DWORD, LPOVERLAPPED);
 
-HANDLE g_hPipe;
+HANDLE hPipe;
 
 int _tmain(VOID)
 {
@@ -82,14 +82,14 @@ int _tmain(VOID)
 		{
 			// The wait conditions are satisfied by a completed connect 
 			// operation. 
-		case WAIT_OBJECT_0:
+		case 0:
 			// If an operation is pending, get the result of the 
 			// connect operation. 
 
 			if (fPendingIO)
 			{
 				fSuccess = GetOverlappedResult(
-					g_hPipe,     // pipe handle 
+					hPipe,     // pipe handle 
 					&oConnect, // OVERLAPPED structure 
 					&cbRet,    // bytes transferred 
 					FALSE);    // does not wait 
@@ -110,18 +110,19 @@ int _tmain(VOID)
 				return 0;
 			}
 
-			lpPipeInst->hPipeInst = g_hPipe;
+			lpPipeInst->hPipeInst = hPipe;
 
 			// Start the read operation for this client. 
 			// Note that this same routine is later used as a 
 			// completion routine after a write operation. 
 
 			lpPipeInst->cbToWrite = 0;
-			CompletedWriteRoutine(0, 0, (LPOVERLAPPED)lpPipeInst);
+			DoReadRoutine(0, 0, (LPOVERLAPPED)lpPipeInst);
 
 			// Create new pipe instance for the next client. 
 
-			fPendingIO = CreateAndConnectInstance(&oConnect);
+			fPendingIO = CreateAndConnectInstance(
+				&oConnect);
 			break;
 
 			// The wait is satisfied by a completed read or write 
@@ -149,7 +150,7 @@ int _tmain(VOID)
 // the pipe, or when a new client has connected to a pipe instance.
 // It starts another read operation. 
 
-VOID WINAPI CompletedWriteRoutine(DWORD dwErr, DWORD cbWritten,
+VOID WINAPI DoReadRoutine(DWORD dwErr, DWORD cbWritten,
 	LPOVERLAPPED lpOverLap)
 {
 	LPPIPEINST lpPipeInst;
@@ -196,25 +197,27 @@ VOID WINAPI CompletedReadRoutine(DWORD dwErr, DWORD cbBytesRead,
 	if ((dwErr == 0) && (cbBytesRead != 0))
 	{
 		GetAnswerToRequest(lpPipeInst);
-
-		fWrite = WriteFileEx(
-			lpPipeInst->hPipeInst,
-			lpPipeInst->chReply,
-			lpPipeInst->cbToWrite,
-			(LPOVERLAPPED)lpPipeInst,
-			(LPOVERLAPPED_COMPLETION_ROUTINE)CompletedWriteRoutine);
+		DoReadRoutine(0, lpPipeInst->cbToWrite, (LPOVERLAPPED)lpPipeInst);
+// TODO: 临时去除
+// 		fWrite = WriteFileEx(
+// 			lpPipeInst->hPipeInst,
+// 			lpPipeInst->chReply,
+// 			lpPipeInst->cbToWrite,
+// 			(LPOVERLAPPED)lpPipeInst,
+// 			(LPOVERLAPPED_COMPLETION_ROUTINE)DoReadRoutine);
 	}
 
 	// Disconnect if an error occurred. 
-
-	if (!fWrite)
-		DisconnectAndClose(lpPipeInst);
+	
+// TODO: 临时去除
+// 	if (!fWrite)
+// 		DisconnectAndClose(lpPipeInst);
 }
 
 // DisconnectAndClose(LPPIPEINST) 
 // This routine is called when an error occurs or the client closes 
 // its handle to the pipe. 
-// 关闭并断开此命名管道
+
 VOID DisconnectAndClose(LPPIPEINST lpPipeInst)
 {
 	// Disconnect the pipe instance. 
@@ -243,7 +246,7 @@ BOOL CreateAndConnectInstance(LPOVERLAPPED lpoOverlap)
 {
 	LPTSTR lpszPipename = TEXT("\\\\.\\pipe\\mynamedpipe");
 
-	g_hPipe = CreateNamedPipe(
+	hPipe = CreateNamedPipe(
 		lpszPipename,             // pipe name 
 		PIPE_ACCESS_DUPLEX |      // read/write access 
 		FILE_FLAG_OVERLAPPED,     // overlapped mode 
@@ -255,7 +258,7 @@ BOOL CreateAndConnectInstance(LPOVERLAPPED lpoOverlap)
 		BUFSIZE * sizeof(TCHAR),    // input buffer size 
 		PIPE_TIMEOUT,             // client time-out 
 		NULL);                    // default security attributes
-	if (g_hPipe == INVALID_HANDLE_VALUE)
+	if (hPipe == INVALID_HANDLE_VALUE)
 	{
 		printf("CreateNamedPipe failed with %d.\n", GetLastError());
 		return 0;
@@ -263,7 +266,7 @@ BOOL CreateAndConnectInstance(LPOVERLAPPED lpoOverlap)
 
 	// Call a subroutine to connect to the new client. 
 
-	return ConnectToNewClient(g_hPipe, lpoOverlap);
+	return ConnectToNewClient(hPipe, lpoOverlap);
 }
 
 BOOL ConnectToNewClient(HANDLE hPipe, LPOVERLAPPED lpo)
@@ -305,7 +308,7 @@ BOOL ConnectToNewClient(HANDLE hPipe, LPOVERLAPPED lpo)
 
 VOID GetAnswerToRequest(LPPIPEINST pipe)
 {
-	_tprintf(TEXT("[%d] %s\n"), pipe->hPipeInst, pipe->chRequest);
+	_tprintf(TEXT("[0x%x]Recv: %s\n"), (unsigned int)pipe->hPipeInst, pipe->chRequest);
 	StringCchCopy(pipe->chReply, BUFSIZE, TEXT("Default answer from server"));
 	pipe->cbToWrite = (lstrlen(pipe->chReply) + 1) * sizeof(TCHAR);
 }
