@@ -14,9 +14,13 @@
 #include <stdio.h>
 #include <tchar.h>
 #include <strsafe.h>
+#include <thread>
 
 #define PIPE_TIMEOUT 5000
 #define BUFSIZE 4096
+
+#define PIPE_NAME_READ "\\\\.\\pipe\\mynamedpipe_read"
+#define PIPE_NAME_WRITE "\\\\.\\pipe\\mynamedpipe_write"
 
 typedef struct
 {
@@ -29,18 +33,20 @@ typedef struct
 } PIPEINST, *LPPIPEINST;
 
 VOID DisconnectAndClose(LPPIPEINST);
-BOOL CreateAndConnectInstance(LPOVERLAPPED);
 BOOL ConnectToNewClient(HANDLE, LPOVERLAPPED);
 VOID GetAnswerToRequest(LPPIPEINST);
 
+BOOL CreateAndConnectPipInstance(const char* pipName, HANDLE &hPipInst, LPOVERLAPPED);
 VOID WINAPI DoReadRoutine(DWORD, DWORD, LPOVERLAPPED);
 VOID WINAPI CompletedReadRoutine(DWORD, DWORD, LPOVERLAPPED);
 
-HANDLE hPipe;
+VOID WINAPI DoWriteRoutine(DWORD, DWORD, LPOVERLAPPED);
+VOID WINAPI CompletedWriteRoutine(DWORD, DWORD, LPOVERLAPPED);
 
-int _tmain(VOID)
+
+void PipeRecvThread()
 {
-	HANDLE hConnectEvent;
+	HANDLE hConnectEvent, hPipeInst;
 	OVERLAPPED oConnect;
 	LPPIPEINST lpPipeInst;
 	DWORD dwWait, cbRet;
@@ -57,7 +63,7 @@ int _tmain(VOID)
 	if (hConnectEvent == NULL)
 	{
 		printf("CreateEvent failed with %d.\n", GetLastError());
-		return 0;
+		return ;
 	}
 
 	oConnect.hEvent = hConnectEvent;
@@ -65,7 +71,110 @@ int _tmain(VOID)
 	// Call a subroutine to create one instance, and wait for 
 	// the client to connect. 
 
-	fPendingIO = CreateAndConnectInstance(&oConnect);
+	fPendingIO = CreateAndConnectPipInstance(PIPE_NAME_READ, hPipeInst, &oConnect);
+
+	while (1)
+	{
+		// Wait for a client to connect, or for a read or write 
+		// operation to be completed, which causes a completion 
+		// routine to be queued for execution. 
+
+		dwWait = WaitForSingleObjectEx(
+			hConnectEvent,  // event object to wait for 
+			INFINITE,       // waits indefinitely 
+			TRUE);          // alertable wait enabled 
+
+		switch (dwWait)
+		{
+				// The wait conditions are satisfied by a completed connect 
+				// operation. 
+			case WAIT_OBJECT_0:
+				// If an operation is pending, get the result of the 
+				// connect operation. 
+				printf("new client \n");
+				// Allocate storage for this instance. 
+
+				lpPipeInst = (LPPIPEINST)GlobalAlloc(
+					GPTR, sizeof(PIPEINST));
+				if (lpPipeInst == NULL)
+				{
+					printf("GlobalAlloc failed (%d)\n", GetLastError());
+					return ;
+				}
+				lpPipeInst->hPipeInst = hPipeInst;
+
+				if (fPendingIO)
+				{
+					fSuccess = GetOverlappedResult(
+						hPipeInst,     // pipe handle 
+						&oConnect, // OVERLAPPED structure 
+						&cbRet,    // bytes transferred 
+						FALSE);    // does not wait 
+					if (!fSuccess)
+					{
+						printf("ConnectNamedPipe (%d)\n", GetLastError());
+						return;
+					}
+				}
+
+				// Start the read operation for this client. 
+				// Note that this same routine is later used as a 
+				// completion routine after a write operation. 
+				lpPipeInst->cbToWrite = 0;
+				DoReadRoutine(0, 0, (LPOVERLAPPED)lpPipeInst);
+
+				// Create new pipe instance for the next client. 
+				fPendingIO = CreateAndConnectPipInstance(PIPE_NAME_READ, hPipeInst, &oConnect);
+				break;
+
+				// The wait is satisfied by a completed read or write 
+				// operation. This allows the system to execute the 
+				// completion routine. 
+
+			case WAIT_IO_COMPLETION:
+				printf("WAIT_IO_COMPLETION\n");
+				break;
+
+				// An error occurred in the wait function. 
+
+			default:
+			{
+				printf("WaitForSingleObjectEx (%d)\n", GetLastError());
+				return ;
+			}
+		}
+	}
+
+}
+
+void PipeWriteThread()
+{
+	HANDLE hConnectEvent, hPipInst;
+	OVERLAPPED oConnect;
+	LPPIPEINST lpPipeInst;
+	DWORD dwWait, cbRet;
+	BOOL fSuccess, fPendingIO;
+
+	// Create one event object for the connect operation. 
+
+	hConnectEvent = CreateEvent(
+		NULL,    // default security attribute
+		TRUE,    // manual reset event 
+		TRUE,    // initial state = signaled 
+		NULL);   // unnamed event object 
+
+	if (hConnectEvent == NULL)
+	{
+		printf("CreateEvent failed with %d.\n", GetLastError());
+		return;
+	}
+
+	oConnect.hEvent = hConnectEvent;
+
+	// Call a subroutine to create one instance, and wait for 
+	// the client to connect. 
+
+	fPendingIO = CreateAndConnectPipInstance(PIPE_NAME_WRITE, hPipInst, &oConnect);
 
 	while (1)
 	{
@@ -82,21 +191,21 @@ int _tmain(VOID)
 		{
 			// The wait conditions are satisfied by a completed connect 
 			// operation. 
-		case 0:
+		case WAIT_OBJECT_0:
 			// If an operation is pending, get the result of the 
 			// connect operation. 
 
 			if (fPendingIO)
 			{
 				fSuccess = GetOverlappedResult(
-					hPipe,     // pipe handle 
+					hPipInst,     // pipe handle 
 					&oConnect, // OVERLAPPED structure 
 					&cbRet,    // bytes transferred 
 					FALSE);    // does not wait 
 				if (!fSuccess)
 				{
 					printf("ConnectNamedPipe (%d)\n", GetLastError());
-					return 0;
+					return;
 				}
 			}
 
@@ -107,22 +216,21 @@ int _tmain(VOID)
 			if (lpPipeInst == NULL)
 			{
 				printf("GlobalAlloc failed (%d)\n", GetLastError());
-				return 0;
+				return;
 			}
 
-			lpPipeInst->hPipeInst = hPipe;
+			lpPipeInst->hPipeInst = hPipInst;
 
 			// Start the read operation for this client. 
 			// Note that this same routine is later used as a 
 			// completion routine after a write operation. 
 
 			lpPipeInst->cbToWrite = 0;
-			DoReadRoutine(0, 0, (LPOVERLAPPED)lpPipeInst);
+			DoWriteRoutine(0, 0, (LPOVERLAPPED)lpPipeInst);
 
 			// Create new pipe instance for the next client. 
 
-			fPendingIO = CreateAndConnectInstance(
-				&oConnect);
+			fPendingIO = CreateAndConnectPipInstance(PIPE_NAME_WRITE, hPipInst, &oConnect);
 			break;
 
 			// The wait is satisfied by a completed read or write 
@@ -138,12 +246,14 @@ int _tmain(VOID)
 		default:
 		{
 			printf("WaitForSingleObjectEx (%d)\n", GetLastError());
-			return 0;
+			return;
 		}
 		}
 	}
-	return 0;
+
 }
+
+
 
 // CompletedWriteRoutine(DWORD, DWORD, LPOVERLAPPED) 
 // This routine is called as a completion routine after writing to 
@@ -175,6 +285,34 @@ VOID WINAPI DoReadRoutine(DWORD dwErr, DWORD cbWritten,
 
 	if (!fRead)
 		DisconnectAndClose(lpPipeInst);
+}
+
+VOID WINAPI DoWriteRoutine(DWORD dwErr, DWORD cbWritten,
+	LPOVERLAPPED lpOverLap)
+{
+	LPPIPEINST lpPipeInst;
+	BOOL fRead = FALSE;
+
+	// lpOverlap points to storage for this instance. 
+
+	lpPipeInst = (LPPIPEINST)lpOverLap;
+
+	// The write operation has finished, so read the next request (if 
+	// there is no error). 
+
+	// if ((dwErr == 0) && (cbWritten == lpPipeInst->cbToWrite))
+// 这儿的发送数据在适当的时候发送，为主动发送
+// 	fRead = WriteFileEx(
+// 		lpPipeInst->hPipeInst,
+// 		lpPipeInst->chRequest,
+// 		BUFSIZE * sizeof(TCHAR),
+// 		(LPOVERLAPPED)lpPipeInst,
+// 		(LPOVERLAPPED_COMPLETION_ROUTINE)CompletedWriteRoutine);
+// 
+// 	// Disconnect if an error occurred. 
+// 
+// 	if (!fRead)
+// 		DisconnectAndClose(lpPipeInst);
 }
 
 // CompletedReadRoutine(DWORD, DWORD, LPOVERLAPPED) 
@@ -214,6 +352,39 @@ VOID WINAPI CompletedReadRoutine(DWORD dwErr, DWORD cbBytesRead,
 // 		DisconnectAndClose(lpPipeInst);
 }
 
+VOID WINAPI CompletedWriteRoutine(DWORD dwErr, DWORD cbBytesRead,
+	LPOVERLAPPED lpOverLap)
+{
+	LPPIPEINST lpPipeInst;
+	BOOL fWrite = FALSE;
+
+	// lpOverlap points to storage for this instance. 
+
+	lpPipeInst = (LPPIPEINST)lpOverLap;
+
+	// The read operation has finished, so write a response (if no 
+	// error occurred). 
+
+// 	if ((dwErr == 0) && (cbBytesRead != 0))
+// 	{
+// 		GetAnswerToRequest(lpPipeInst);
+// 		DoReadRoutine(0, lpPipeInst->cbToWrite, (LPOVERLAPPED)lpPipeInst);
+	// TODO: 临时去除
+// 	fWrite = WriteFileEx(
+// 		lpPipeInst->hPipeInst,
+// 		lpPipeInst->chReply,
+// 		lpPipeInst->cbToWrite,
+// 		(LPOVERLAPPED)lpPipeInst,
+// 		(LPOVERLAPPED_COMPLETION_ROUTINE)DoWriteRoutine);
+//	}
+
+	// Disconnect if an error occurred. 
+
+	// TODO: 临时去除
+// 	if (!fWrite)
+// 		DisconnectAndClose(lpPipeInst);
+}
+
 // DisconnectAndClose(LPPIPEINST) 
 // This routine is called when an error occurs or the client closes 
 // its handle to the pipe. 
@@ -242,12 +413,10 @@ VOID DisconnectAndClose(LPPIPEINST lpPipeInst)
 // It returns TRUE if the connect operation is pending, and FALSE if 
 // the connection has been completed. 
 
-BOOL CreateAndConnectInstance(LPOVERLAPPED lpoOverlap)
+BOOL CreateAndConnectPipInstance(const char* pipName, HANDLE &hPipeInst, LPOVERLAPPED lpoOverlap)
 {
-	LPTSTR lpszPipename = TEXT("\\\\.\\pipe\\mynamedpipe");
-
-	hPipe = CreateNamedPipe(
-		lpszPipename,             // pipe name 
+	hPipeInst = CreateNamedPipe(
+		pipName,             // pipe name 
 		PIPE_ACCESS_DUPLEX |      // read/write access 
 		FILE_FLAG_OVERLAPPED,     // overlapped mode 
 		PIPE_TYPE_MESSAGE |       // message-type pipe 
@@ -258,23 +427,22 @@ BOOL CreateAndConnectInstance(LPOVERLAPPED lpoOverlap)
 		BUFSIZE * sizeof(TCHAR),    // input buffer size 
 		PIPE_TIMEOUT,             // client time-out 
 		NULL);                    // default security attributes
-	if (hPipe == INVALID_HANDLE_VALUE)
+	if (hPipeInst == INVALID_HANDLE_VALUE)
 	{
 		printf("CreateNamedPipe failed with %d.\n", GetLastError());
 		return 0;
 	}
 
 	// Call a subroutine to connect to the new client. 
-
-	return ConnectToNewClient(hPipe, lpoOverlap);
+	return ConnectToNewClient(hPipeInst, lpoOverlap);
 }
 
-BOOL ConnectToNewClient(HANDLE hPipe, LPOVERLAPPED lpo)
+BOOL ConnectToNewClient(HANDLE hPipeInst, LPOVERLAPPED lpo)
 {
 	BOOL fConnected, fPendingIO = FALSE;
 
 	// Start an overlapped connection for this pipe instance. 
-	fConnected = ConnectNamedPipe(hPipe, lpo);
+	fConnected = ConnectNamedPipe(hPipeInst, lpo);
 
 	// Overlapped ConnectNamedPipe should return zero. 
 	if (fConnected)
@@ -286,22 +454,22 @@ BOOL ConnectToNewClient(HANDLE hPipe, LPOVERLAPPED lpo)
 	switch (GetLastError())
 	{
 		// The overlapped connection in progress. 
-	case ERROR_IO_PENDING:
-		fPendingIO = TRUE;
-		break;
-
-		// Client is already connected, so signal an event. 
-
-	case ERROR_PIPE_CONNECTED:
-		if (SetEvent(lpo->hEvent))
+		case ERROR_IO_PENDING:
+			fPendingIO = TRUE;
 			break;
 
-		// If an error occurs during the connect operation... 
-	default:
-	{
-		printf("ConnectNamedPipe failed with %d.\n", GetLastError());
-		return 0;
-	}
+			// Client is already connected, so signal an event. 
+
+		case ERROR_PIPE_CONNECTED:
+			if (SetEvent(lpo->hEvent))
+				break;
+
+			// If an error occurs during the connect operation... 
+		default:
+		{
+			printf("ConnectNamedPipe failed with %d.\n", GetLastError());
+			return 0;
+		}
 	}
 	return fPendingIO;
 }
@@ -311,4 +479,19 @@ VOID GetAnswerToRequest(LPPIPEINST pipe)
 	_tprintf(TEXT("[0x%x]Recv: %s\n"), (unsigned int)pipe->hPipeInst, pipe->chRequest);
 	StringCchCopy(pipe->chReply, BUFSIZE, TEXT("Default answer from server"));
 	pipe->cbToWrite = (lstrlen(pipe->chReply) + 1) * sizeof(TCHAR);
+}
+
+
+
+
+
+int _tmain(VOID)
+{
+	std::thread* t1 = new std::thread(&PipeRecvThread);
+	std::thread* t2 = new std::thread(&PipeWriteThread);
+	while (true)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	return 0;
 }
